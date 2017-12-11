@@ -12,19 +12,43 @@ type MapFunc func(report.Node, report.Networks) report.Nodes
 
 // Renderer is something that can render a report to a set of Nodes.
 type Renderer interface {
-	Render(report.Report, Decorator) report.Nodes
-	Stats(report.Report, Decorator) Stats
+	Render(report.Report) Nodes
 }
 
-// Stats is the type returned by Renderer.Stats
-type Stats struct {
-	FilteredNodes int
+// Nodes is the result of Rendering
+type Nodes struct {
+	report.Nodes
+	Filtered int
 }
 
-func (s Stats) merge(other Stats) Stats {
-	return Stats{
-		FilteredNodes: s.FilteredNodes + other.FilteredNodes,
+// Merge merges the results of Rendering
+func (r Nodes) Merge(o Nodes) Nodes {
+	return Nodes{
+		Nodes:    r.Nodes.Merge(o.Nodes),
+		Filtered: r.Filtered + o.Filtered,
 	}
+}
+
+// Transformer is something that transforms one set of Nodes to
+// another set of Nodes.
+type Transformer interface {
+	Transform(nodes Nodes) Nodes
+}
+
+// Transformers is a composition of Transformers
+type Transformers []Transformer
+
+// Transform implements Transformer
+func (ts Transformers) Transform(nodes Nodes) Nodes {
+	for _, t := range ts {
+		nodes = t.Transform(nodes)
+	}
+	return nodes
+}
+
+// Render renders the report and then transforms it
+func Render(rpt report.Report, renderer Renderer, transformer Transformer) Nodes {
+	return transformer.Transform(renderer.Render(rpt))
 }
 
 // Reduce renderer is a Renderer which merges together the output of several
@@ -37,17 +61,17 @@ func MakeReduce(renderers ...Renderer) Renderer {
 }
 
 // Render produces a set of Nodes given a Report.
-func (r Reduce) Render(rpt report.Report, dct Decorator) report.Nodes {
+func (r Reduce) Render(rpt report.Report) Nodes {
 	l := len(r)
 	switch l {
 	case 0:
-		return report.Nodes{}
+		return Nodes{}
 	}
-	c := make(chan report.Nodes, l)
+	c := make(chan Nodes, l)
 	for _, renderer := range r {
 		renderer := renderer // Pike!!
 		go func() {
-			c <- renderer.Render(rpt, dct)
+			c <- renderer.Render(rpt)
 		}()
 	}
 	for ; l > 1; l-- {
@@ -59,15 +83,6 @@ func (r Reduce) Render(rpt report.Report, dct Decorator) report.Nodes {
 	return <-c
 }
 
-// Stats implements Renderer
-func (r Reduce) Stats(rpt report.Report, dct Decorator) Stats {
-	var result Stats
-	for _, renderer := range r {
-		result = result.merge(renderer.Stats(rpt, dct))
-	}
-	return result
-}
-
 // Map is a Renderer which produces a set of Nodes from the set of
 // Nodes produced by another Renderer.
 type Map struct {
@@ -77,14 +92,14 @@ type Map struct {
 
 // MakeMap makes a new Map
 func MakeMap(f MapFunc, r Renderer) Renderer {
-	return &Map{f, r}
+	return Map{f, r}
 }
 
 // Render transforms a set of Nodes produces by another Renderer.
 // using a map function
-func (m *Map) Render(rpt report.Report, dct Decorator) report.Nodes {
+func (m Map) Render(rpt report.Report) Nodes {
 	var (
-		input         = m.Renderer.Render(rpt, dct)
+		input         = m.Renderer.Render(rpt)
 		output        = report.Nodes{}
 		mapped        = map[string]report.IDList{} // input node ID -> output node IDs
 		adjacencies   = map[string]report.IDList{} // output node ID -> input node Adjacencies
@@ -92,7 +107,7 @@ func (m *Map) Render(rpt report.Report, dct Decorator) report.Nodes {
 	)
 
 	// Rewrite all the nodes according to the map function
-	for _, inRenderable := range input {
+	for _, inRenderable := range input.Nodes {
 		for _, outRenderable := range m.MapFunc(inRenderable, localNetworks) {
 			if existing, ok := output[outRenderable.ID]; ok {
 				outRenderable = outRenderable.Merge(existing)
@@ -115,50 +130,7 @@ func (m *Map) Render(rpt report.Report, dct Decorator) report.Nodes {
 		output[outNodeID] = outNode
 	}
 
-	return output
-}
-
-// Stats implements Renderer
-func (m *Map) Stats(_ report.Report, _ Decorator) Stats {
-	// There doesn't seem to be an instance where we want stats to recurse
-	// through Maps - for instance we don't want to see the number of filtered
-	// processes in the container renderer.
-	return Stats{}
-}
-
-// Decorator transforms one renderer to another. e.g. Filters.
-type Decorator func(Renderer) Renderer
-
-// ComposeDecorators composes decorators into one.
-func ComposeDecorators(decorators ...Decorator) Decorator {
-	return func(r Renderer) Renderer {
-		for _, decorator := range decorators {
-			r = decorator(r)
-		}
-		return r
-	}
-}
-
-type applyDecorator struct {
-	Renderer
-}
-
-func (ad applyDecorator) Render(rpt report.Report, dct Decorator) report.Nodes {
-	if dct != nil {
-		return dct(ad.Renderer).Render(rpt, nil)
-	}
-	return ad.Renderer.Render(rpt, nil)
-}
-func (ad applyDecorator) Stats(rpt report.Report, dct Decorator) Stats {
-	if dct != nil {
-		return dct(ad.Renderer).Stats(rpt, nil)
-	}
-	return Stats{}
-}
-
-// ApplyDecorator returns a renderer which will apply the given decorator to the child render.
-func ApplyDecorator(renderer Renderer) Renderer {
-	return applyDecorator{renderer}
+	return Nodes{Nodes: output}
 }
 
 func propagateLatest(key string, from, to report.Node) report.Node {
@@ -182,30 +154,11 @@ func ConditionalRenderer(c Condition, r Renderer) Renderer {
 	return conditionalRenderer{c, r}
 }
 
-func (cr conditionalRenderer) Render(rpt report.Report, dct Decorator) report.Nodes {
+func (cr conditionalRenderer) Render(rpt report.Report) Nodes {
 	if cr.Condition(rpt) {
-		return cr.Renderer.Render(rpt, dct)
+		return cr.Renderer.Render(rpt)
 	}
-	return report.Nodes{}
-}
-func (cr conditionalRenderer) Stats(rpt report.Report, dct Decorator) Stats {
-	if cr.Condition(rpt) {
-		return cr.Renderer.Stats(rpt, dct)
-	}
-	return Stats{}
-}
-
-// ConstantRenderer renders a fixed set of nodes
-type ConstantRenderer report.Nodes
-
-// Render implements Renderer
-func (c ConstantRenderer) Render(_ report.Report, _ Decorator) report.Nodes {
-	return report.Nodes(c)
-}
-
-// Stats implements Renderer
-func (c ConstantRenderer) Stats(_ report.Report, _ Decorator) Stats {
-	return Stats{}
+	return Nodes{}
 }
 
 // joinResults is used by Renderers that join sets of nodes
@@ -218,24 +171,46 @@ func newJoinResults() joinResults {
 	return joinResults{nodes: make(report.Nodes), mapped: map[string]string{}}
 }
 
-// Add Node M under id, creating a new result node if not already there
-// and updating the mapping from old ID to new ID
-// Note we do not update any counters for child topologies here, because addToResults
-// is only ever called when m is an endpoint and we never look at endpoint counts
-func (ret *joinResults) addToResults(m report.Node, id string, create func(string) report.Node) {
+// Add m as a child of the node at id, creating a new result node if
+// not already there, and updating the mapping from old ID to new ID.
+func (ret *joinResults) addChild(m report.Node, id string, create func(string) report.Node) {
+	result, exists := ret.nodes[id]
+	if !exists {
+		result = create(id)
+	}
+	result.Children = result.Children.Add(m)
+	if m.Topology != report.Endpoint { // optimisation: we never look at endpoint counts
+		result.Counters = result.Counters.Add(m.Topology, 1)
+	}
+	ret.nodes[id] = result
+	ret.mapped[m.ID] = id
+}
+
+// Like addChild, but also add m's children.
+func (ret *joinResults) addChildAndChildren(m report.Node, id string, create func(string) report.Node) {
 	result, exists := ret.nodes[id]
 	if !exists {
 		result = create(id)
 	}
 	result.Children = result.Children.Add(m)
 	result.Children = result.Children.Merge(m.Children)
+	if m.Topology != report.Endpoint { // optimisation: we never look at endpoint counts
+		result.Counters = result.Counters.Add(m.Topology, 1)
+	}
 	ret.nodes[id] = result
 	ret.mapped[m.ID] = id
 }
 
+// Add a copy of n straight into the results
+func (ret *joinResults) passThrough(n report.Node) {
+	n.Adjacency = nil // fixupAdjacencies assumes all nodes start with blank lists
+	ret.nodes[n.ID] = n
+	ret.mapped[n.ID] = n.ID
+}
+
 // Rewrite Adjacency for new nodes in ret for original nodes in input
-func (ret *joinResults) fixupAdjacencies(input report.Nodes) {
-	for _, n := range input {
+func (ret *joinResults) fixupAdjacencies(input Nodes) {
+	for _, n := range input.Nodes {
 		outID, ok := ret.mapped[n.ID]
 		if !ok {
 			continue
@@ -252,10 +227,21 @@ func (ret *joinResults) fixupAdjacencies(input report.Nodes) {
 	}
 }
 
-func (ret *joinResults) copyUnmatched(input report.Nodes) {
-	for _, n := range input {
+func (ret *joinResults) copyUnmatched(input Nodes) {
+	for _, n := range input.Nodes {
 		if _, found := ret.nodes[n.ID]; !found {
 			ret.nodes[n.ID] = n
 		}
 	}
+}
+
+func (ret *joinResults) result() Nodes {
+	return Nodes{Nodes: ret.nodes}
+}
+
+// ResetCache blows away the rendered node cache, and known service
+// cache.
+func ResetCache() {
+	renderCache.Purge()
+	purgeKnownServiceCache()
 }

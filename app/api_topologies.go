@@ -96,7 +96,8 @@ func updateSwarmFilters(rpt report.Report, topologies []APITopologyDesc) []APITo
 
 func updateKubeFilters(rpt report.Report, topologies []APITopologyDesc) []APITopologyDesc {
 	namespaces := map[string]struct{}{}
-	for _, t := range []report.Topology{rpt.Pod, rpt.Service, rpt.Deployment} {
+	// We exclude ReplicaSets since we don't show them anywhere.
+	for _, t := range []report.Topology{rpt.Pod, rpt.Service, rpt.Deployment, rpt.DaemonSet, rpt.StatefulSet, rpt.CronJob} {
 		for _, n := range t.Nodes {
 			if state, ok := n.Latest.Lookup(kubernetes.State); ok && state == kubernetes.StateDeleted {
 				continue
@@ -199,7 +200,8 @@ func MakeRegistry() *Registry {
 	registry.Add(
 		APITopologyDesc{
 			id:          processesID,
-			renderer:    render.FilterUnconnected(render.ProcessWithContainerNameRenderer),
+			renderer:    render.ProcessWithContainerNameRenderer,
+			filter:      render.FilterUnconnected,
 			Name:        "Processes",
 			Rank:        1,
 			Options:     unconnectedFilter,
@@ -208,14 +210,16 @@ func MakeRegistry() *Registry {
 		APITopologyDesc{
 			id:          processesByNameID,
 			parent:      processesID,
-			renderer:    render.FilterUnconnected(render.ProcessNameRenderer),
+			renderer:    render.ProcessNameRenderer,
+			filter:      render.FilterUnconnected,
 			Name:        "by name",
 			Options:     unconnectedFilter,
 			HideIfEmpty: true,
 		},
 		APITopologyDesc{
 			id:       containersID,
-			renderer: render.FilterUnconnectedPseudo(render.ContainerWithImageNameRenderer),
+			renderer: render.ContainerWithImageNameRenderer,
+			filter:   render.FilterUnconnectedPseudo,
 			Name:     "Containers",
 			Rank:     2,
 			Options:  containerFilters,
@@ -223,20 +227,23 @@ func MakeRegistry() *Registry {
 		APITopologyDesc{
 			id:       containersByHostnameID,
 			parent:   containersID,
-			renderer: render.FilterUnconnectedPseudo(render.ContainerHostnameRenderer),
+			renderer: render.ContainerHostnameRenderer,
+			filter:   render.FilterUnconnectedPseudo,
 			Name:     "by DNS name",
 			Options:  containerFilters,
 		},
 		APITopologyDesc{
 			id:       containersByImageID,
 			parent:   containersID,
-			renderer: render.FilterUnconnectedPseudo(render.ContainerImageRenderer),
+			renderer: render.ContainerImageRenderer,
+			filter:   render.FilterUnconnectedPseudo,
 			Name:     "by image",
 			Options:  containerFilters,
 		},
 		APITopologyDesc{
 			id:          podsID,
-			renderer:    render.FilterUnconnectedPseudo(render.PodRenderer),
+			renderer:    render.PodRenderer,
+			filter:      render.FilterUnconnectedPseudo,
 			Name:        "Pods",
 			Rank:        3,
 			Options:     []APITopologyOptionGroup{unmanagedFilter},
@@ -245,7 +252,8 @@ func MakeRegistry() *Registry {
 		APITopologyDesc{
 			id:          kubeControllersID,
 			parent:      podsID,
-			renderer:    render.FilterUnconnectedPseudo(render.KubeControllerRenderer),
+			renderer:    render.KubeControllerRenderer,
+			filter:      render.FilterUnconnectedPseudo,
 			Name:        "controllers",
 			Options:     []APITopologyOptionGroup{unmanagedFilter},
 			HideIfEmpty: true,
@@ -253,14 +261,16 @@ func MakeRegistry() *Registry {
 		APITopologyDesc{
 			id:          servicesID,
 			parent:      podsID,
-			renderer:    render.FilterUnconnectedPseudo(render.PodServiceRenderer),
+			renderer:    render.PodServiceRenderer,
+			filter:      render.FilterUnconnectedPseudo,
 			Name:        "services",
 			Options:     []APITopologyOptionGroup{unmanagedFilter},
 			HideIfEmpty: true,
 		},
 		APITopologyDesc{
 			id:          ecsTasksID,
-			renderer:    render.FilterUnconnectedPseudo(render.ECSTaskRenderer),
+			renderer:    render.ECSTaskRenderer,
+			filter:      render.FilterUnconnectedPseudo,
 			Name:        "Tasks",
 			Rank:        3,
 			Options:     []APITopologyOptionGroup{unmanagedFilter},
@@ -269,14 +279,16 @@ func MakeRegistry() *Registry {
 		APITopologyDesc{
 			id:          ecsServicesID,
 			parent:      ecsTasksID,
-			renderer:    render.FilterUnconnectedPseudo(render.ECSServiceRenderer),
+			renderer:    render.ECSServiceRenderer,
+			filter:      render.FilterUnconnectedPseudo,
 			Name:        "services",
 			Options:     []APITopologyOptionGroup{unmanagedFilter},
 			HideIfEmpty: true,
 		},
 		APITopologyDesc{
 			id:          swarmServicesID,
-			renderer:    render.FilterUnconnectedPseudo(render.SwarmServiceRenderer),
+			renderer:    render.SwarmServiceRenderer,
+			filter:      render.FilterUnconnectedPseudo,
 			Name:        "services",
 			Rank:        3,
 			Options:     []APITopologyOptionGroup{unmanagedFilter},
@@ -284,14 +296,16 @@ func MakeRegistry() *Registry {
 		},
 		APITopologyDesc{
 			id:       hostsID,
-			renderer: render.FilterUnconnectedPseudo(render.HostRenderer),
+			renderer: render.HostRenderer,
+			filter:   render.FilterUnconnectedPseudo,
 			Name:     "Hosts",
 			Rank:     4,
 		},
 		APITopologyDesc{
 			id:       weaveID,
 			parent:   hostsID,
-			renderer: render.FilterUnconnectedPseudo(render.WeaveRenderer),
+			renderer: render.WeaveRenderer,
+			filter:   render.FilterUnconnectedPseudo,
 			Name:     "Weave Net",
 		},
 	)
@@ -304,6 +318,7 @@ type APITopologyDesc struct {
 	id       string
 	parent   string
 	renderer render.Renderer
+	filter   render.Transformer
 
 	Name        string                   `json:"name"`
 	Rank        int                      `json:"rank"`
@@ -336,9 +351,8 @@ type APITopologyOptionGroup struct {
 	NoneLabel string `json:"noneLabel,omitempty"`
 }
 
-// Get the render filters to use for this option group as a Decorator, if any.
-// If second arg is false, no decorator was needed.
-func (g APITopologyOptionGroup) getFilterDecorator(value string) (render.Decorator, bool) {
+// Get the render filters to use for this option group, if any, or nil otherwise.
+func (g APITopologyOptionGroup) filter(value string) render.FilterFunc {
 	selectType := g.SelectType
 	if selectType == "" {
 		selectType = "one"
@@ -351,7 +365,7 @@ func (g APITopologyOptionGroup) getFilterDecorator(value string) (render.Decorat
 		values = strings.Split(value, ",")
 	default:
 		log.Errorf("Invalid select type %s for option group %s, ignoring option", selectType, g.ID)
-		return nil, false
+		return nil
 	}
 	filters := []render.FilterFunc{}
 	for _, opt := range g.Options {
@@ -374,11 +388,9 @@ func (g APITopologyOptionGroup) getFilterDecorator(value string) (render.Decorat
 		}
 	}
 	if len(filters) == 0 {
-		return nil, false
+		return nil
 	}
-	// Since we've encoded whether to ignore pseudo topologies into each subfilter,
-	// we want no special behaviour for pseudo topologies here, which corresponds to MakePseudo
-	return render.MakeFilterPseudoDecorator(render.AnyFilterFunc(filters...)), true
+	return render.AnyFilterFunc(filters...)
 }
 
 // APITopologyOption describes a &param=value to a given topology.
@@ -487,41 +499,41 @@ func (r *Registry) renderTopologies(rpt report.Report, req *http.Request) []APIT
 	topologies := []APITopologyDesc{}
 	req.ParseForm()
 	r.walk(func(desc APITopologyDesc) {
-		renderer, decorator, _ := r.RendererForTopology(desc.id, req.Form, rpt)
-		desc.Stats = decorateWithStats(rpt, renderer, decorator)
+		renderer, filter, _ := r.RendererForTopology(desc.id, req.Form, rpt)
+		desc.Stats = computeStats(rpt, renderer, filter)
 		for i, sub := range desc.SubTopologies {
-			renderer, decorator, _ := r.RendererForTopology(sub.id, req.Form, rpt)
-			desc.SubTopologies[i].Stats = decorateWithStats(rpt, renderer, decorator)
+			renderer, filter, _ := r.RendererForTopology(sub.id, req.Form, rpt)
+			desc.SubTopologies[i].Stats = computeStats(rpt, renderer, filter)
 		}
 		topologies = append(topologies, desc)
 	})
 	return updateFilters(rpt, topologies)
 }
 
-func decorateWithStats(rpt report.Report, renderer render.Renderer, decorator render.Decorator) topologyStats {
+func computeStats(rpt report.Report, renderer render.Renderer, transformer render.Transformer) topologyStats {
 	var (
 		nodes     int
 		realNodes int
 		edges     int
 	)
-	for _, n := range renderer.Render(rpt, decorator) {
+	r := render.Render(rpt, renderer, transformer)
+	for _, n := range r.Nodes {
 		nodes++
 		if n.Topology != render.Pseudo {
 			realNodes++
 		}
 		edges += len(n.Adjacency)
 	}
-	renderStats := renderer.Stats(rpt, decorator)
 	return topologyStats{
 		NodeCount:          nodes,
 		NonpseudoNodeCount: realNodes,
 		EdgeCount:          edges,
-		FilteredNodes:      renderStats.FilteredNodes,
+		FilteredNodes:      r.Filtered,
 	}
 }
 
 // RendererForTopology ..
-func (r *Registry) RendererForTopology(topologyID string, values url.Values, rpt report.Report) (render.Renderer, render.Decorator, error) {
+func (r *Registry) RendererForTopology(topologyID string, values url.Values, rpt report.Report) (render.Renderer, render.Transformer, error) {
 	topology, ok := r.get(topologyID)
 	if !ok {
 		return nil, nil, fmt.Errorf("topology not found: %s", topologyID)
@@ -529,24 +541,21 @@ func (r *Registry) RendererForTopology(topologyID string, values url.Values, rpt
 	topology = updateFilters(rpt, []APITopologyDesc{topology})[0]
 
 	if len(values) == 0 {
-		// Do not apply filtering if no options where provided
-		return topology.renderer, nil, nil
+		// if no options where provided, only apply base filter
+		return topology.renderer, topology.filter, nil
 	}
 
-	var decorators []render.Decorator
+	var filters []render.FilterFunc
 	for _, group := range topology.Options {
 		value := values.Get(group.ID)
-		if decorator, ok := group.getFilterDecorator(value); ok {
-			decorators = append(decorators, decorator)
+		if filter := group.filter(value); filter != nil {
+			filters = append(filters, filter)
 		}
 	}
-	if len(decorators) > 0 {
-		// Here we tell the topology renderer to apply the filtering decorator
-		// that we construct as a composition of all the selected filters.
-		composedFilterDecorator := render.ComposeDecorators(decorators...)
-		return render.ApplyDecorator(topology.renderer), composedFilterDecorator, nil
+	if len(filters) > 0 {
+		return topology.renderer, render.Transformers([]render.Transformer{render.ComposeFilterFuncs(filters...), topology.filter}), nil
 	}
-	return topology.renderer, nil, nil
+	return topology.renderer, topology.filter, nil
 }
 
 type reporterHandler func(context.Context, Reporter, http.ResponseWriter, *http.Request)
@@ -557,7 +566,7 @@ func captureReporter(rep Reporter, f reporterHandler) CtxHandlerFunc {
 	}
 }
 
-type rendererHandler func(context.Context, render.Renderer, render.Decorator, report.RenderContext, http.ResponseWriter, *http.Request)
+type rendererHandler func(context.Context, render.Renderer, render.Transformer, report.RenderContext, http.ResponseWriter, *http.Request)
 
 func (r *Registry) captureRenderer(rep Reporter, f rendererHandler) CtxHandlerFunc {
 	return func(ctx context.Context, w http.ResponseWriter, req *http.Request) {
@@ -575,11 +584,11 @@ func (r *Registry) captureRenderer(rep Reporter, f rendererHandler) CtxHandlerFu
 			return
 		}
 		req.ParseForm()
-		renderer, decorator, err := r.RendererForTopology(topologyID, req.Form, rpt)
+		renderer, filter, err := r.RendererForTopology(topologyID, req.Form, rpt)
 		if err != nil {
 			respondWith(w, http.StatusInternalServerError, err)
 			return
 		}
-		f(ctx, renderer, decorator, RenderContextForReporter(rep, rpt), w, req)
+		f(ctx, renderer, filter, RenderContextForReporter(rep, rpt), w, req)
 	}
 }

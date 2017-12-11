@@ -25,14 +25,11 @@ func renderProcesses(rpt report.Report) bool {
 var EndpointRenderer = SelectEndpoint
 
 // ProcessRenderer is a Renderer which produces a renderable process
-// graph by merging the endpoint graph and the process topology.
-var ProcessRenderer = Memoise(endpoints2Processes{})
-
-// ColorConnectedProcessRenderer colors connected nodes from
-// ProcessRenderer. Since the process topology views only show
-// connected processes, we need this info to determine whether
+// graph by merging the endpoint graph and the process topology. It
+// also colors connected nodes. Since the process topology views only
+// show connected processes, we need this info to determine whether
 // processes appearing in a details panel are linkable.
-var ColorConnectedProcessRenderer = Memoise(ColorConnected(ProcessRenderer))
+var ProcessRenderer = Memoise(ColorConnected(endpoints2Processes{}))
 
 // processWithContainerNameRenderer is a Renderer which produces a process
 // graph enriched with container names where appropriate
@@ -40,18 +37,18 @@ type processWithContainerNameRenderer struct {
 	Renderer
 }
 
-func (r processWithContainerNameRenderer) Render(rpt report.Report, dct Decorator) report.Nodes {
-	processes := r.Renderer.Render(rpt, dct)
-	containers := SelectContainer.Render(rpt, dct)
+func (r processWithContainerNameRenderer) Render(rpt report.Report) Nodes {
+	processes := r.Renderer.Render(rpt)
+	containers := SelectContainer.Render(rpt)
 
 	outputs := report.Nodes{}
-	for id, p := range processes {
+	for id, p := range processes.Nodes {
 		outputs[id] = p
 		containerID, timestamp, ok := p.Latest.LookupEntry(docker.ContainerID)
 		if !ok {
 			continue
 		}
-		container, ok := containers[report.MakeContainerNodeID(containerID)]
+		container, ok := containers.Nodes[report.MakeContainerNodeID(containerID)]
 		if !ok {
 			continue
 		}
@@ -61,7 +58,7 @@ func (r processWithContainerNameRenderer) Render(rpt report.Report, dct Decorato
 		}
 		outputs[id] = p
 	}
-	return outputs
+	return Nodes{Nodes: outputs, Filtered: processes.Filtered}
 }
 
 // ProcessWithContainerNameRenderer is a Renderer which produces a process
@@ -74,32 +71,27 @@ var ProcessWithContainerNameRenderer = processWithContainerNameRenderer{ProcessR
 // name graph by munging the progess graph.
 //
 // not memoised
-var ProcessNameRenderer = ConditionalRenderer(renderProcesses,
-	MakeMap(
-		MapProcess2Name,
-		ProcessRenderer,
-	),
-)
+var ProcessNameRenderer = CustomRenderer{RenderFunc: processes2Names, Renderer: ProcessRenderer}
 
 // endpoints2Processes joins the endpoint topology to the process
 // topology, matching on hostID and pid.
 type endpoints2Processes struct {
 }
 
-func (e endpoints2Processes) Render(rpt report.Report, dct Decorator) report.Nodes {
+func (e endpoints2Processes) Render(rpt report.Report) Nodes {
 	if len(rpt.Process.Nodes) == 0 {
-		return report.Nodes{}
+		return Nodes{}
 	}
 	local := LocalNetworks(rpt)
-	processes := SelectProcess.Render(rpt, dct)
-	endpoints := SelectEndpoint.Render(rpt, dct)
+	processes := SelectProcess.Render(rpt)
+	endpoints := SelectEndpoint.Render(rpt)
 	ret := newJoinResults()
 
-	for _, n := range endpoints {
+	for _, n := range endpoints.Nodes {
 		// Nodes without a hostid are treated as pseudo nodes
 		if hostNodeID, ok := n.Latest.Lookup(report.HostNodeID); !ok {
 			if id, ok := pseudoNodeID(n, local); ok {
-				ret.addToResults(n, id, newPseudoNode)
+				ret.addChild(n, id, newPseudoNode)
 			}
 		} else {
 			pid, timestamp, ok := n.Latest.LookupEntry(process.PID)
@@ -116,8 +108,8 @@ func (e endpoints2Processes) Render(rpt report.Report, dct Decorator) report.Nod
 
 			hostID, _, _ := report.ParseNodeID(hostNodeID)
 			id := report.MakeProcessNodeID(hostID, pid)
-			ret.addToResults(n, id, func(id string) report.Node {
-				if processNode, found := processes[id]; found {
+			ret.addChild(n, id, func(id string) report.Node {
+				if processNode, found := processes.Nodes[id]; found {
 					return processNode
 				}
 				// we have a pid, but no matching process node; create a new one rather than dropping the data
@@ -129,30 +121,26 @@ func (e endpoints2Processes) Render(rpt report.Report, dct Decorator) report.Nod
 	ret.copyUnmatched(processes)
 	ret.fixupAdjacencies(processes)
 	ret.fixupAdjacencies(endpoints)
-	return ret.nodes
+	return ret.result()
 }
 
-func (e endpoints2Processes) Stats(rpt report.Report, _ Decorator) Stats {
-	return Stats{} // nothing to report
-}
+// processes2Names maps process Nodes to Nodes for each process name.
+func processes2Names(processes Nodes) Nodes {
+	ret := newJoinResults()
 
-// MapProcess2Name maps process Nodes to Nodes
-// for each process name.
-//
-// This mapper is unlike the other foo2bar mappers as the intention
-// is not to join the information with another topology.
-func MapProcess2Name(n report.Node, _ report.Networks) report.Nodes {
-	if n.Topology == Pseudo {
-		return report.Nodes{n.ID: n}
+	for _, n := range processes.Nodes {
+		if n.Topology == Pseudo {
+			ret.passThrough(n)
+		} else {
+			name, timestamp, ok := n.Latest.LookupEntry(process.Name)
+			if ok {
+				ret.addChildAndChildren(n, name, func(id string) report.Node {
+					return report.MakeNode(id).WithTopology(MakeGroupNodeTopology(n.Topology, process.Name)).
+						WithLatest(process.Name, timestamp, name)
+				})
+			}
+		}
 	}
-
-	name, timestamp, ok := n.Latest.LookupEntry(process.Name)
-	if !ok {
-		return report.Nodes{}
-	}
-
-	node := NewDerivedNode(name, n).WithTopology(MakeGroupNodeTopology(n.Topology, process.Name))
-	node.Latest = node.Latest.Set(process.Name, timestamp, name)
-	node.Counters = node.Counters.Add(n.Topology, 1)
-	return report.Nodes{name: node}
+	ret.fixupAdjacencies(processes)
+	return ret.result()
 }

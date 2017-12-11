@@ -33,7 +33,7 @@ var ContainerRenderer = Memoise(MakeFilter(
 	MakeReduce(
 		MakeMap(
 			MapProcess2Container,
-			ColorConnectedProcessRenderer,
+			ProcessRenderer,
 		),
 		ConnectionJoin(MapContainer2IP, SelectContainer),
 	),
@@ -53,14 +53,14 @@ type connectionJoin struct {
 	r     Renderer
 }
 
-func (c connectionJoin) Render(rpt report.Report, dct Decorator) report.Nodes {
+func (c connectionJoin) Render(rpt report.Report) Nodes {
 	local := LocalNetworks(rpt)
-	inputNodes := c.r.Render(rpt, dct)
-	endpoints := SelectEndpoint.Render(rpt, dct)
+	inputNodes := c.r.Render(rpt)
+	endpoints := SelectEndpoint.Render(rpt)
 
 	// Collect all the IPs we are trying to map to, and which ID they map from
 	var ipNodes = map[string]string{}
-	for _, n := range inputNodes {
+	for _, n := range inputNodes.Nodes {
 		for _, ip := range c.toIPs(n) {
 			if _, exists := ipNodes[ip]; exists {
 				// If an IP is shared between multiple nodes, we can't reliably
@@ -74,7 +74,7 @@ func (c connectionJoin) Render(rpt report.Report, dct Decorator) report.Nodes {
 	ret := newJoinResults()
 
 	// Now look at all the endpoints and see which map to IP nodes
-	for _, m := range endpoints {
+	for _, m := range endpoints.Nodes {
 		scope, addr, port, ok := report.ParseEndpointNodeID(m.ID)
 		if !ok {
 			continue
@@ -82,7 +82,7 @@ func (c connectionJoin) Render(rpt report.Report, dct Decorator) report.Nodes {
 		// Nodes without a hostid may be pseudo nodes - if so, pass through to result
 		if _, ok := m.Latest.Lookup(report.HostNodeID); !ok {
 			if id, ok := externalNodeID(m, addr, local); ok {
-				ret.addToResults(m, id, newPseudoNode)
+				ret.addChild(m, id, newPseudoNode)
 				continue
 			}
 		}
@@ -94,19 +94,15 @@ func (c connectionJoin) Render(rpt report.Report, dct Decorator) report.Nodes {
 			id, found = ipNodes[report.MakeScopedEndpointNodeID(scope, addr, port)]
 		}
 		if found && id != "" { // not one we blanked out earlier
-			ret.addToResults(m, id, func(id string) report.Node {
-				return inputNodes[id]
+			ret.addChild(m, id, func(id string) report.Node {
+				return inputNodes.Nodes[id]
 			})
 		}
 	}
 	ret.copyUnmatched(inputNodes)
 	ret.fixupAdjacencies(inputNodes)
 	ret.fixupAdjacencies(endpoints)
-	return ret.nodes
-}
-
-func (c connectionJoin) Stats(rpt report.Report, _ Decorator) Stats {
-	return Stats{} // nothing to report
+	return ret.result()
 }
 
 // FilterEmpty is a Renderer which filters out nodes which have no children
@@ -135,18 +131,18 @@ type containerWithImageNameRenderer struct {
 
 // Render produces a container graph where the the latest metadata contains the
 // container image name, if found.
-func (r containerWithImageNameRenderer) Render(rpt report.Report, dct Decorator) report.Nodes {
-	containers := r.Renderer.Render(rpt, dct)
-	images := SelectContainerImage.Render(rpt, dct)
+func (r containerWithImageNameRenderer) Render(rpt report.Report) Nodes {
+	containers := r.Renderer.Render(rpt)
+	images := SelectContainerImage.Render(rpt)
 
 	outputs := report.Nodes{}
-	for id, c := range containers {
+	for id, c := range containers.Nodes {
 		outputs[id] = c
 		imageID, ok := c.Latest.Lookup(docker.ImageID)
 		if !ok {
 			continue
 		}
-		image, ok := images[report.MakeContainerImageNodeID(imageID)]
+		image, ok := images.Nodes[report.MakeContainerImageNodeID(imageID)]
 		if !ok {
 			continue
 		}
@@ -166,7 +162,7 @@ func (r containerWithImageNameRenderer) Render(rpt report.Report, dct Decorator)
 			Add(report.ContainerImage, report.MakeStringSet(imageNodeID))
 		outputs[id] = c
 	}
-	return outputs
+	return Nodes{Nodes: outputs, Filtered: containers.Filtered}
 }
 
 // ContainerWithImageNameRenderer is a Renderer which produces a container
@@ -289,7 +285,7 @@ func MapProcess2Container(n report.Node, _ report.Networks) report.Nodes {
 		id = MakePseudoNodeID(UncontainedID, report.ExtractHostID(n))
 		node = NewDerivedPseudoNode(id, n)
 		node = propagateLatest(report.HostNodeID, n, node)
-		node = propagateLatest(IsConnected, n, node)
+		node = propagateLatest(IsConnectedMark, n, node)
 	}
 	return report.Nodes{id: node}
 }

@@ -109,7 +109,7 @@ func TestRendererForTopologyWithFiltering(t *testing.T) {
 	urlvalues.Set(systemGroupID, customAPITopologyOptionFilterID)
 	urlvalues.Set("stopped", "running")
 	urlvalues.Set("pseudo", "hide")
-	renderer, decorator, err := topologyRegistry.RendererForTopology("containers", urlvalues, fixture.Report)
+	renderer, filter, err := topologyRegistry.RendererForTopology("containers", urlvalues, fixture.Report)
 	if err != nil {
 		t.Fatalf("Topology Registry Report error: %s", err)
 	}
@@ -118,7 +118,7 @@ func TestRendererForTopologyWithFiltering(t *testing.T) {
 	input.Container.Nodes[fixture.ClientContainerNodeID] = input.Container.Nodes[fixture.ClientContainerNodeID].WithLatests(map[string]string{
 		docker.LabelPrefix + "works.weave.role": "system",
 	})
-	have := utils.Prune(renderer.Render(input, decorator))
+	have := utils.Prune(render.Render(input, renderer, filter).Nodes)
 	want := utils.Prune(expected.RenderedContainers.Copy())
 	delete(want, fixture.ClientContainerNodeID)
 	delete(want, render.MakePseudoNodeID(render.UncontainedID, fixture.ServerHostID))
@@ -140,7 +140,7 @@ func TestRendererForTopologyNoFiltering(t *testing.T) {
 	urlvalues.Set(systemGroupID, customAPITopologyOptionFilterID)
 	urlvalues.Set("stopped", "running")
 	urlvalues.Set("pseudo", "hide")
-	renderer, decorator, err := topologyRegistry.RendererForTopology("containers", urlvalues, fixture.Report)
+	renderer, filter, err := topologyRegistry.RendererForTopology("containers", urlvalues, fixture.Report)
 	if err != nil {
 		t.Fatalf("Topology Registry Report error: %s", err)
 	}
@@ -149,7 +149,7 @@ func TestRendererForTopologyNoFiltering(t *testing.T) {
 	input.Container.Nodes[fixture.ClientContainerNodeID] = input.Container.Nodes[fixture.ClientContainerNodeID].WithLatests(map[string]string{
 		docker.LabelPrefix + "works.weave.role": "system",
 	})
-	have := utils.Prune(renderer.Render(input, decorator))
+	have := utils.Prune(render.Render(input, renderer, filter).Nodes)
 	want := utils.Prune(expected.RenderedContainers.Copy())
 	delete(want, render.MakePseudoNodeID(render.UncontainedID, fixture.ServerHostID))
 	delete(want, render.OutgoingInternetID)
@@ -164,26 +164,26 @@ func getTestContainerLabelFilterTopologySummary(t *testing.T, exclude bool) (det
 
 	var (
 		topologyRegistry = app.MakeRegistry()
-		filter           render.FilterFunc
+		filterFunc       render.FilterFunc
 	)
 	if exclude == true {
-		filter = render.DoesNotHaveLabel(fixture.TestLabelKey2, fixture.ApplicationLabelValue2)
+		filterFunc = render.DoesNotHaveLabel(fixture.TestLabelKey2, fixture.ApplicationLabelValue2)
 	} else {
-		filter = render.HasLabel(fixture.TestLabelKey1, fixture.ApplicationLabelValue1)
+		filterFunc = render.HasLabel(fixture.TestLabelKey1, fixture.ApplicationLabelValue1)
 	}
-	option := app.MakeAPITopologyOption(customAPITopologyOptionFilterID, "title", filter, false)
+	option := app.MakeAPITopologyOption(customAPITopologyOptionFilterID, "title", filterFunc, false)
 	topologyRegistry.AddContainerFilters(option)
 
 	urlvalues := url.Values{}
 	urlvalues.Set(systemGroupID, customAPITopologyOptionFilterID)
 	urlvalues.Set("stopped", "running")
 	urlvalues.Set("pseudo", "hide")
-	renderer, decorator, err := topologyRegistry.RendererForTopology("containers", urlvalues, fixture.Report)
+	renderer, filter, err := topologyRegistry.RendererForTopology("containers", urlvalues, fixture.Report)
 	if err != nil {
 		return nil, err
 	}
 
-	return detailed.Summaries(report.RenderContext{Report: fixture.Report}, renderer.Render(fixture.Report, decorator)), nil
+	return detailed.Summaries(report.RenderContext{Report: fixture.Report}, render.Render(fixture.Report, renderer, filter).Nodes), nil
 }
 
 func TestAPITopologyAddsKubernetes(t *testing.T) {

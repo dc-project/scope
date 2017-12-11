@@ -7,28 +7,17 @@ import (
 // HostRenderer is a Renderer which produces a renderable host
 // graph from the host topology.
 //
-var HostRenderer = Memoise(MakeReduce(
+// not memoised
+var HostRenderer = MakeReduce(
 	endpoints2Hosts{},
-	MakeMap(
-		MapX2Host,
-		ColorConnectedProcessRenderer,
-	),
-	MakeMap(
-		MapX2Host,
-		ContainerRenderer,
-	),
-	MakeMap(
-		MapX2Host,
-		ContainerImageRenderer,
-	),
-	MakeMap(
-		MapX2Host,
-		PodRenderer,
-	),
+	CustomRenderer{RenderFunc: nodes2Hosts, Renderer: ProcessRenderer},
+	CustomRenderer{RenderFunc: nodes2Hosts, Renderer: ContainerRenderer},
+	CustomRenderer{RenderFunc: nodes2Hosts, Renderer: ContainerImageRenderer},
+	CustomRenderer{RenderFunc: nodes2Hosts, Renderer: PodRenderer},
 	SelectHost,
-))
+)
 
-// MapX2Host maps any Nodes to host Nodes.
+// nodes2Hosts maps any Nodes to host Nodes.
 //
 // If this function is given a node without a hostname
 // (including other pseudo nodes), it will drop the node.
@@ -37,27 +26,22 @@ var HostRenderer = Memoise(MakeReduce(
 // format for a host, but without any Major or Minor labels.  It does
 // not have enough info to do that, and the resulting graph must be
 // merged with a host graph to get that info.
-func MapX2Host(n report.Node, _ report.Networks) report.Nodes {
-	// Don't propagate pseudo nodes - we do this in MapEndpoint2Host
-	if n.Topology == Pseudo {
-		return report.Nodes{}
-	}
+func nodes2Hosts(nodes Nodes) Nodes {
+	ret := newJoinResults()
 
-	hostIDs, ok := n.Parents.Lookup(report.Host)
-	if !ok {
-		return report.Nodes{}
+	for _, n := range nodes.Nodes {
+		if n.Topology == Pseudo {
+			continue // Don't propagate pseudo nodes - we do this in endpoints2Hosts
+		}
+		hostIDs, _ := n.Parents.Lookup(report.Host)
+		for _, id := range hostIDs {
+			ret.addChild(n, id, func(id string) report.Node {
+				return report.MakeNode(id).WithTopology(report.Host)
+			})
+		}
 	}
-
-	result := report.Nodes{}
-	children := report.MakeNodeSet(n)
-	for _, id := range hostIDs {
-		node := NewDerivedNode(id, n).WithTopology(report.Host)
-		node.Counters = node.Counters.Add(n.Topology, 1)
-		node.Children = children
-		result[id] = node
-	}
-
-	return result
+	ret.fixupAdjacencies(nodes)
+	return ret.result()
 }
 
 // endpoints2Hosts takes nodes from the endpoint topology and produces
@@ -65,12 +49,12 @@ func MapX2Host(n report.Node, _ report.Networks) report.Nodes {
 type endpoints2Hosts struct {
 }
 
-func (e endpoints2Hosts) Render(rpt report.Report, dct Decorator) report.Nodes {
+func (e endpoints2Hosts) Render(rpt report.Report) Nodes {
 	local := LocalNetworks(rpt)
-	endpoints := SelectEndpoint.Render(rpt, dct)
+	endpoints := SelectEndpoint.Render(rpt)
 	ret := newJoinResults()
 
-	for _, n := range endpoints {
+	for _, n := range endpoints.Nodes {
 		// Nodes without a hostid are treated as pseudo nodes
 		hostNodeID, timestamp, ok := n.Latest.LookupEntry(report.HostNodeID)
 		if !ok {
@@ -78,19 +62,15 @@ func (e endpoints2Hosts) Render(rpt report.Report, dct Decorator) report.Nodes {
 			if !ok {
 				continue
 			}
-			ret.addToResults(n, id, newPseudoNode)
+			ret.addChild(n, id, newPseudoNode)
 		} else {
 			id := report.MakeHostNodeID(report.ExtractHostID(n))
-			ret.addToResults(n, id, func(id string) report.Node {
+			ret.addChild(n, id, func(id string) report.Node {
 				return report.MakeNode(id).WithTopology(report.Host).
 					WithLatest(report.HostNodeID, timestamp, hostNodeID)
 			})
 		}
 	}
 	ret.fixupAdjacencies(endpoints)
-	return ret.nodes
-}
-
-func (e endpoints2Hosts) Stats(rpt report.Report, _ Decorator) Stats {
-	return Stats{} // nothing to report
+	return ret.result()
 }
