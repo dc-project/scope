@@ -18,11 +18,11 @@ import (
 
 // These constants are keys used in node metadata
 const (
-	IP                 = "kubernetes_ip"
-	ObservedGeneration = "kubernetes_observed_generation"
-	Replicas           = "kubernetes_replicas"
-	DesiredReplicas    = "kubernetes_desired_replicas"
-	NodeType           = "kubernetes_node_type"
+	IP                 = report.KubernetesIP
+	ObservedGeneration = report.KubernetesObservedGeneration
+	Replicas           = report.KubernetesReplicas
+	DesiredReplicas    = report.KubernetesDesiredReplicas
+	NodeType           = report.KubernetesNodeType
 )
 
 // Exposed for testing
@@ -58,17 +58,7 @@ var (
 		Strategy:           {ID: Strategy, Label: "Strategy", From: report.FromLatest, Priority: 7},
 	}
 
-	DeploymentMetricTemplates = ReplicaSetMetricTemplates
-
-	ReplicaSetMetadataTemplates = report.MetadataTemplates{
-		Namespace:          {ID: Namespace, Label: "Namespace", From: report.FromLatest, Priority: 2},
-		Created:            {ID: Created, Label: "Created", From: report.FromLatest, Datatype: report.DateTime, Priority: 3},
-		ObservedGeneration: {ID: ObservedGeneration, Label: "Observed Gen.", From: report.FromLatest, Datatype: report.Number, Priority: 4},
-		DesiredReplicas:    {ID: DesiredReplicas, Label: "Desired Replicas", From: report.FromLatest, Datatype: report.Number, Priority: 5},
-		report.Pod:         {ID: report.Pod, Label: "# Pods", From: report.FromCounters, Datatype: report.Number, Priority: 6},
-	}
-
-	ReplicaSetMetricTemplates = PodMetricTemplates
+	DeploymentMetricTemplates = PodMetricTemplates
 
 	DaemonSetMetadataTemplates = report.MetadataTemplates{
 		NodeType:        {ID: NodeType, Label: "Type", From: report.FromLatest, Priority: 1},
@@ -264,6 +254,10 @@ func (r *Reporter) Report() (report.Report, error) {
 	if err != nil {
 		return result, err
 	}
+	namespaceTopology, err := r.namespaceTopology()
+	if err != nil {
+		return result, err
+	}
 	result.Pod = result.Pod.Merge(podTopology)
 	result.Service = result.Service.Merge(serviceTopology)
 	result.Host = result.Host.Merge(hostTopology)
@@ -271,6 +265,7 @@ func (r *Reporter) Report() (report.Report, error) {
 	result.StatefulSet = result.StatefulSet.Merge(statefulSetTopology)
 	result.CronJob = result.CronJob.Merge(cronJobTopology)
 	result.Deployment = result.Deployment.Merge(deploymentTopology)
+	result.Namespace = result.Namespace.Merge(namespaceTopology)
 	return result, nil
 }
 
@@ -499,4 +494,13 @@ func (r *Reporter) podTopology(services []Service, deployments []Deployment, dae
 		return nil
 	})
 	return pods, err
+}
+
+func (r *Reporter) namespaceTopology() (report.Topology, error) {
+	result := report.MakeTopology()
+	err := r.client.WalkNamespaces(func(ns NamespaceResource) error {
+		result = result.AddNode(ns.GetNode())
+		return nil
+	})
+	return result, err
 }

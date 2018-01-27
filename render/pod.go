@@ -15,7 +15,7 @@ const (
 )
 
 // UnmanagedIDPrefix is the prefix of unmanaged pseudo nodes
-var UnmanagedIDPrefix = MakePseudoNodeID(UnmanagedID)
+var UnmanagedIDPrefix = MakePseudoNodeID(UnmanagedID, "")
 
 func renderKubernetesTopologies(rpt report.Report) bool {
 	// Render if any k8s topology has any nodes
@@ -49,8 +49,7 @@ var PodRenderer = Memoise(ConditionalRenderer(renderKubernetesTopologies,
 			return (!ok || state != kubernetes.StateDeleted)
 		},
 		MakeReduce(
-			MakeMap(
-				PropagateSingleMetrics(report.Container),
+			PropagateSingleMetrics(report.Container,
 				MakeMap(
 					Map2Parent([]string{report.Pod}, UnmanagedID),
 					MakeFilter(
@@ -62,7 +61,7 @@ var PodRenderer = Memoise(ConditionalRenderer(renderKubernetesTopologies,
 					),
 				),
 			),
-			ConnectionJoin(MapPod2IP, SelectPod),
+			ConnectionJoin(MapPod2IP, report.Pod),
 		),
 	),
 ))
@@ -101,8 +100,7 @@ func renderParents(childTopology string, parentTopologies []string, noParentsPse
 	}
 	return MakeReduce(append(
 		selectors,
-		MakeMap(
-			PropagateSingleMetrics(childTopology),
+		PropagateSingleMetrics(childTopology,
 			MakeMap(
 				Map2Parent(parentTopologies, noParentsPseudoID),
 				childRenderer,
@@ -136,10 +134,10 @@ func Map2Parent(
 	// any parents in the group, eg. UnmanagedID, or "" to drop nodes without any parents.
 	noParentsPseudoID string,
 ) MapFunc {
-	return func(n report.Node, _ report.Networks) report.Nodes {
+	return func(n report.Node) report.Nodes {
 		// Uncontained becomes Unmanaged/whatever if noParentsPseudoID is set
 		if noParentsPseudoID != "" && strings.HasPrefix(n.ID, UncontainedIDPrefix) {
-			id := MakePseudoNodeID(noParentsPseudoID, report.ExtractHostID(n))
+			id := MakePseudoNodeID(noParentsPseudoID, n.ID[len(UncontainedIDPrefix):])
 			node := NewDerivedPseudoNode(id, n)
 			return report.Nodes{id: node}
 		}

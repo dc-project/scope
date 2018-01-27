@@ -22,6 +22,7 @@ const (
 	DaemonSet      = "daemon_set"
 	StatefulSet    = "stateful_set"
 	CronJob        = "cron_job"
+	Namespace      = "namespace"
 	ContainerImage = "container_image"
 	Host           = "host"
 	Overlay        = "overlay"
@@ -42,6 +43,27 @@ const (
 	// Used when counting the number of containers
 	ContainersKey = "containers"
 )
+
+// topologyNames are the names of all report topologies.
+var topologyNames = []string{
+	Endpoint,
+	Process,
+	Container,
+	ContainerImage,
+	Pod,
+	Service,
+	Deployment,
+	ReplicaSet,
+	DaemonSet,
+	StatefulSet,
+	CronJob,
+	Namespace,
+	Host,
+	Overlay,
+	ECSTask,
+	ECSService,
+	SwarmService,
+}
 
 // Report is the core data type. It's produced by probes, and consumed and
 // stored by apps. It's composed of multiple topologies, each representing
@@ -95,6 +117,11 @@ type Report struct {
 	// present.
 	CronJob Topology
 
+	// Namespace nodes represent all Kubernetes Namespaces running on hosts running probes.
+	// Metadata includes things like Namespace id, name, etc. Edges are not
+	// present.
+	Namespace Topology
+
 	// ContainerImages nodes represent all Docker containers images on
 	// hosts running probes. Metadata includes things like image id, name etc.
 	// Edges are not present.
@@ -121,7 +148,7 @@ type Report struct {
 
 	// Overlay nodes are active peers in any software-defined network that's
 	// overlaid on the infrastructure. The information is scraped by polling
-	// their status endpoints. Edges could be present, but aren't currently.
+	// their status endpoints. Edges are present.
 	Overlay Topology
 
 	// Sampling data for this report.
@@ -146,12 +173,6 @@ type Report struct {
 	// must be equal, but we don't require that equal reports have
 	// the same id.
 	ID string `deepequal:"skip"`
-}
-
-// RenderContext carries contextual data that is needed when rendering parts of the report.
-type RenderContext struct {
-	Report
-	MetricsGraphURL string
 }
 
 // MakeReport makes a clean report, ready to Merge() other reports into.
@@ -203,6 +224,8 @@ func MakeReport() Report {
 			WithShape(Triangle).
 			WithLabel("cron job", "cron jobs"),
 
+		Namespace: MakeTopology(),
+
 		Overlay: MakeTopology().
 			WithShape(Circle).
 			WithLabel("peer", "peers"),
@@ -223,28 +246,6 @@ func MakeReport() Report {
 		Window:   0,
 		Plugins:  xfer.MakePluginSpecs(),
 		ID:       fmt.Sprintf("%d", rand.Int63()),
-	}
-}
-
-// TopologyMap gets a map from topology names to pointers to the respective topologies
-func (r *Report) TopologyMap() map[string]*Topology {
-	return map[string]*Topology{
-		Endpoint:       &r.Endpoint,
-		Process:        &r.Process,
-		Container:      &r.Container,
-		ContainerImage: &r.ContainerImage,
-		Pod:            &r.Pod,
-		Service:        &r.Service,
-		Deployment:     &r.Deployment,
-		ReplicaSet:     &r.ReplicaSet,
-		DaemonSet:      &r.DaemonSet,
-		StatefulSet:    &r.StatefulSet,
-		CronJob:        &r.CronJob,
-		Host:           &r.Host,
-		Overlay:        &r.Overlay,
-		ECSTask:        &r.ECSTask,
-		ECSService:     &r.ECSService,
-		SwarmService:   &r.SwarmService,
 	}
 }
 
@@ -275,46 +276,75 @@ func (r Report) Merge(other Report) Report {
 	return newReport
 }
 
-// Topologies returns a slice of Topologies in this report
-func (r Report) Topologies() []Topology {
-	result := []Topology{}
-	r.WalkTopologies(func(t *Topology) {
-		result = append(result, *t)
-	})
-	return result
-}
-
 // WalkTopologies iterates through the Topologies of the report,
 // potentially modifying them
 func (r *Report) WalkTopologies(f func(*Topology)) {
-	var dummy Report
-	r.WalkPairedTopologies(&dummy, func(t, _ *Topology) { f(t) })
+	for _, name := range topologyNames {
+		f(r.topology(name))
+	}
+}
+
+// WalkNamedTopologies iterates through the Topologies of the report,
+// potentially modifying them.
+func (r *Report) WalkNamedTopologies(f func(string, *Topology)) {
+	for _, name := range topologyNames {
+		f(name, r.topology(name))
+	}
 }
 
 // WalkPairedTopologies iterates through the Topologies of this and another report,
 // potentially modifying one or both.
 func (r *Report) WalkPairedTopologies(o *Report, f func(*Topology, *Topology)) {
-	f(&r.Endpoint, &o.Endpoint)
-	f(&r.Process, &o.Process)
-	f(&r.Container, &o.Container)
-	f(&r.ContainerImage, &o.ContainerImage)
-	f(&r.Pod, &o.Pod)
-	f(&r.Service, &o.Service)
-	f(&r.Deployment, &o.Deployment)
-	f(&r.ReplicaSet, &o.ReplicaSet)
-	f(&r.DaemonSet, &o.DaemonSet)
-	f(&r.StatefulSet, &o.StatefulSet)
-	f(&r.CronJob, &o.CronJob)
-	f(&r.Host, &o.Host)
-	f(&r.Overlay, &o.Overlay)
-	f(&r.ECSTask, &o.ECSTask)
-	f(&r.ECSService, &o.ECSService)
-	f(&r.SwarmService, &o.SwarmService)
+	for _, name := range topologyNames {
+		f(r.topology(name), o.topology(name))
+	}
 }
 
-// Topology gets a topology by name
+// topology returns a reference to one of the report's topologies,
+// selected by name.
+func (r *Report) topology(name string) *Topology {
+	switch name {
+	case Endpoint:
+		return &r.Endpoint
+	case Process:
+		return &r.Process
+	case Container:
+		return &r.Container
+	case ContainerImage:
+		return &r.ContainerImage
+	case Pod:
+		return &r.Pod
+	case Service:
+		return &r.Service
+	case Deployment:
+		return &r.Deployment
+	case ReplicaSet:
+		return &r.ReplicaSet
+	case DaemonSet:
+		return &r.DaemonSet
+	case StatefulSet:
+		return &r.StatefulSet
+	case CronJob:
+		return &r.CronJob
+	case Namespace:
+		return &r.Namespace
+	case Host:
+		return &r.Host
+	case Overlay:
+		return &r.Overlay
+	case ECSTask:
+		return &r.ECSTask
+	case ECSService:
+		return &r.ECSService
+	case SwarmService:
+		return &r.SwarmService
+	}
+	return nil
+}
+
+// Topology returns one of the report's topologies, selected by name.
 func (r Report) Topology(name string) (Topology, bool) {
-	if t, ok := r.TopologyMap()[name]; ok {
+	if t := r.topology(name); t != nil {
 		return *t, true
 	}
 	return Topology{}, false
@@ -323,8 +353,8 @@ func (r Report) Topology(name string) (Topology, bool) {
 // Validate checks the report for various inconsistencies.
 func (r Report) Validate() error {
 	var errs []string
-	for _, topology := range r.Topologies() {
-		if err := topology.Validate(); err != nil {
+	for _, name := range topologyNames {
+		if err := r.topology(name).Validate(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
@@ -341,7 +371,7 @@ func (r Report) Validate() error {
 //
 // This for now creates node's LatestControls from Controls.
 func (r Report) Upgrade() Report {
-	return r.upgradeLatestControls().upgradePodNodes()
+	return r.upgradeLatestControls().upgradePodNodes().upgradeNamespaces()
 }
 
 func (r Report) upgradeLatestControls() Report {
@@ -405,6 +435,36 @@ func (r Report) upgradePodNodes() Report {
 		nodes[podID] = pod
 	}
 	r.Pod.Nodes = nodes
+
+	return r
+}
+
+func (r Report) upgradeNamespaces() Report {
+	if len(r.Namespace.Nodes) > 0 {
+		return r
+	}
+
+	namespaces := map[string]struct{}{}
+	for _, t := range []Topology{r.Pod, r.Service, r.Deployment, r.DaemonSet, r.StatefulSet, r.CronJob} {
+		for _, n := range t.Nodes {
+			if state, ok := n.Latest.Lookup(KubernetesState); ok && state == KubernetesStateDeleted {
+				continue
+			}
+			if namespace, ok := n.Latest.Lookup(KubernetesNamespace); ok {
+				namespaces[namespace] = struct{}{}
+			}
+		}
+	}
+
+	nodes := make(Nodes, len(namespaces))
+	for ns := range namespaces {
+		// Namespace ID:
+		// Probes did not use to report namespace ids, but since creating a report node requires an id,
+		// the namespace name, which is unique, is passed to `MakeNamespaceNodeID`
+		namespaceID := MakeNamespaceNodeID(ns)
+		nodes[namespaceID] = MakeNodeWith(namespaceID, map[string]string{KubernetesName: ns})
+	}
+	r.Namespace.Nodes = nodes
 
 	return r
 }

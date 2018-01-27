@@ -9,8 +9,10 @@ import (
 	"github.com/weaveworks/common/backoff"
 
 	log "github.com/Sirupsen/logrus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	apiv1 "k8s.io/client-go/pkg/api/v1"
@@ -30,56 +32,35 @@ type Client interface {
 	WalkPods(f func(Pod) error) error
 	WalkServices(f func(Service) error) error
 	WalkDeployments(f func(Deployment) error) error
-	WalkReplicaSets(f func(ReplicaSet) error) error
 	WalkDaemonSets(f func(DaemonSet) error) error
 	WalkStatefulSets(f func(StatefulSet) error) error
 	WalkCronJobs(f func(CronJob) error) error
-	WalkReplicationControllers(f func(ReplicationController) error) error
-	WalkNodes(f func(*apiv1.Node) error) error
+	WalkNamespaces(f func(NamespaceResource) error) error
 
 	WatchPods(f func(Event, Pod))
 
-	GetLogs(namespaceID, podID string) (io.ReadCloser, error)
+	GetLogs(namespaceID, podID string, containerNames []string) (io.ReadCloser, error)
 	DeletePod(namespaceID, podID string) error
 	ScaleUp(resource, namespaceID, id string) error
 	ScaleDown(resource, namespaceID, id string) error
 }
 
 type client struct {
-	quit                       chan struct{}
-	resyncPeriod               time.Duration
-	client                     *kubernetes.Clientset
-	podStore                   cache.Store
-	serviceStore               cache.Store
-	deploymentStore            cache.Store
-	replicaSetStore            cache.Store
-	daemonSetStore             cache.Store
-	statefulSetStore           cache.Store
-	jobStore                   cache.Store
-	cronJobStore               cache.Store
-	replicationControllerStore cache.Store
-	nodeStore                  cache.Store
+	quit             chan struct{}
+	resyncPeriod     time.Duration
+	client           *kubernetes.Clientset
+	podStore         cache.Store
+	serviceStore     cache.Store
+	deploymentStore  cache.Store
+	daemonSetStore   cache.Store
+	statefulSetStore cache.Store
+	jobStore         cache.Store
+	cronJobStore     cache.Store
+	nodeStore        cache.Store
+	namespaceStore   cache.Store
 
 	podWatchesMutex sync.Mutex
 	podWatches      []func(Event, Pod)
-}
-
-// runReflectorUntil runs cache.Reflector#ListAndWatch in an endless loop.
-// Errors are logged and retried with exponential backoff.
-func runReflectorUntil(r *cache.Reflector, resyncPeriod time.Duration, stopCh <-chan struct{}, msg string) {
-	listAndWatch := func() (bool, error) {
-		select {
-		case <-stopCh:
-			return true, nil
-		default:
-			err := r.ListAndWatch(stopCh)
-			return false, err
-		}
-	}
-	bo := backoff.New(listAndWatch, fmt.Sprintf("Kubernetes reflector (%s)", msg))
-	bo.SetInitialBackoff(resyncPeriod)
-	bo.SetMaxBackoff(5 * time.Minute)
-	go bo.Start()
 }
 
 // ClientConfig establishes the configuration for the kubernetes client
@@ -138,7 +119,6 @@ func NewClient(config ClientConfig) (Client, error) {
 		if err != nil {
 			return nil, err
 		}
-
 	}
 	log.Infof("kubernetes: targeting api server %s", restConfig.Host)
 
@@ -155,45 +135,69 @@ func NewClient(config ClientConfig) (Client, error) {
 
 	podStore := NewEventStore(result.triggerPodWatches, cache.MetaNamespaceKeyFunc)
 	result.podStore = result.setupStore(c.CoreV1Client.RESTClient(), "pods", &apiv1.Pod{}, podStore)
-
 	result.serviceStore = result.setupStore(c.CoreV1Client.RESTClient(), "services", &apiv1.Service{}, nil)
-	result.replicationControllerStore = result.setupStore(c.CoreV1Client.RESTClient(), "replicationcontrollers", &apiv1.ReplicationController{}, nil)
 	result.nodeStore = result.setupStore(c.CoreV1Client.RESTClient(), "nodes", &apiv1.Node{}, nil)
-
-	// We list deployments here to check if this version of kubernetes is >= 1.2.
-	// We would use NegotiateVersion, but Kubernetes 1.1 "supports"
-	// extensions/v1beta1, but not deployments, replicasets or daemonsets.
-	if _, err := c.Extensions().Deployments(metav1.NamespaceAll).List(metav1.ListOptions{}); err != nil {
-		log.Infof("Deployments, ReplicaSets and DaemonSets are not supported by this Kubernetes version: %v", err)
-	} else {
-		result.deploymentStore = result.setupStore(c.ExtensionsV1beta1Client.RESTClient(), "deployments", &apiextensionsv1beta1.Deployment{}, nil)
-		result.replicaSetStore = result.setupStore(c.ExtensionsV1beta1Client.RESTClient(), "replicasets", &apiextensionsv1beta1.ReplicaSet{}, nil)
-		result.daemonSetStore = result.setupStore(c.ExtensionsV1beta1Client.RESTClient(), "daemonsets", &apiextensionsv1beta1.DaemonSet{}, nil)
-	}
-	// CronJobs and StatefulSets were introduced later. Easiest to use the same technique.
-	if _, err := c.BatchV2alpha1().CronJobs(metav1.NamespaceAll).List(metav1.ListOptions{}); err != nil {
-		log.Infof("CronJobs are not supported by this Kubernetes version: %v", err)
-	} else {
-		result.jobStore = result.setupStore(c.BatchV1Client.RESTClient(), "jobs", &apibatchv1.Job{}, nil)
-		result.cronJobStore = result.setupStore(c.BatchV2alpha1Client.RESTClient(), "cronjobs", &apibatchv2alpha1.CronJob{}, nil)
-	}
-	if _, err := c.Apps().StatefulSets(metav1.NamespaceAll).List(metav1.ListOptions{}); err != nil {
-		log.Infof("StatefulSets are not supported by this Kubernetes version: %v", err)
-	} else {
-		result.statefulSetStore = result.setupStore(c.AppsV1beta1Client.RESTClient(), "statefulsets", &apiappsv1beta1.StatefulSet{}, nil)
-	}
+	result.namespaceStore = result.setupStore(c.CoreV1Client.RESTClient(), "namespaces", &apiv1.Namespace{}, nil)
+	result.deploymentStore = result.setupStore(c.ExtensionsV1beta1Client.RESTClient(), "deployments", &apiextensionsv1beta1.Deployment{}, nil)
+	result.daemonSetStore = result.setupStore(c.ExtensionsV1beta1Client.RESTClient(), "daemonsets", &apiextensionsv1beta1.DaemonSet{}, nil)
+	result.jobStore = result.setupStore(c.BatchV1Client.RESTClient(), "jobs", &apibatchv1.Job{}, nil)
+	result.cronJobStore = result.setupStore(c.BatchV2alpha1Client.RESTClient(), "cronjobs", &apibatchv2alpha1.CronJob{}, nil)
+	result.statefulSetStore = result.setupStore(c.AppsV1beta1Client.RESTClient(), "statefulsets", &apiappsv1beta1.StatefulSet{}, nil)
 
 	return result, nil
 }
 
-func (c *client) setupStore(kclient cache.Getter, resource string, itemType interface{}, nonDefaultStore cache.Store) cache.Store {
+func (c *client) isResourceSupported(groupVersion schema.GroupVersion, resource string) (bool, error) {
+	resourceList, err := c.client.Discovery().ServerResourcesForGroupVersion(groupVersion.String())
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	for _, v := range resourceList.APIResources {
+		if v.Name == resource {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (c *client) setupStore(kclient rest.Interface, resource string, itemType interface{}, nonDefaultStore cache.Store) cache.Store {
 	lw := cache.NewListWatchFromClient(kclient, resource, metav1.NamespaceAll, fields.Everything())
 	store := nonDefaultStore
 	if store == nil {
 		store = cache.NewStore(cache.MetaNamespaceKeyFunc)
 	}
-	runReflectorUntil(cache.NewReflector(lw, itemType, store, c.resyncPeriod), c.resyncPeriod, c.quit, resource)
+	c.runReflectorUntil(cache.NewReflector(lw, itemType, store, c.resyncPeriod), kclient.APIVersion(), resource)
 	return store
+}
+
+// runReflectorUntil runs cache.Reflector#ListAndWatch in an endless loop, after checking that the resource is supported by kubernetes.
+// Errors are logged and retried with exponential backoff.
+func (c *client) runReflectorUntil(r *cache.Reflector, groupVersion schema.GroupVersion, resource string) {
+	listAndWatch := func() (bool, error) {
+		select {
+		case <-c.quit:
+			return true, nil
+		default:
+			ok, err := c.isResourceSupported(groupVersion, resource)
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				log.Infof("%v are not supported by this Kubernetes version", resource)
+				return true, nil
+			}
+			err = r.ListAndWatch(c.quit)
+			return false, err
+		}
+	}
+	bo := backoff.New(listAndWatch, fmt.Sprintf("Kubernetes reflector (%s)", resource))
+	bo.SetMaxBackoff(5 * time.Minute)
+	go bo.Start()
 }
 
 func (c *client) WatchPods(f func(Event, Pod)) {
@@ -237,32 +241,6 @@ func (c *client) WalkDeployments(f func(Deployment) error) error {
 	for _, m := range c.deploymentStore.List() {
 		d := m.(*apiextensionsv1beta1.Deployment)
 		if err := f(NewDeployment(d)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// WalkReplicaSets calls f for each replica set
-func (c *client) WalkReplicaSets(f func(ReplicaSet) error) error {
-	if c.replicaSetStore == nil {
-		return nil
-	}
-	for _, m := range c.replicaSetStore.List() {
-		rs := m.(*apiextensionsv1beta1.ReplicaSet)
-		if err := f(NewReplicaSet(rs)); err != nil {
-			return err
-		}
-	}
-	return nil
-
-}
-
-// WalkReplicationcontrollers calls f for each replication controller
-func (c *client) WalkReplicationControllers(f func(ReplicationController) error) error {
-	for _, m := range c.replicationControllerStore.List() {
-		rc := m.(*apiv1.ReplicationController)
-		if err := f(NewReplicationController(rc)); err != nil {
 			return err
 		}
 	}
@@ -317,25 +295,38 @@ func (c *client) WalkCronJobs(f func(CronJob) error) error {
 	return nil
 }
 
-func (c *client) WalkNodes(f func(*apiv1.Node) error) error {
-	for _, m := range c.nodeStore.List() {
-		node := m.(*apiv1.Node)
-		if err := f(node); err != nil {
+func (c *client) WalkNamespaces(f func(NamespaceResource) error) error {
+	for _, m := range c.namespaceStore.List() {
+		namespace := m.(*apiv1.Namespace)
+		if err := f(NewNamespace(namespace)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *client) GetLogs(namespaceID, podID string) (io.ReadCloser, error) {
-	req := c.client.CoreV1().Pods(namespaceID).GetLogs(
-		podID,
-		&apiv1.PodLogOptions{
-			Follow:     true,
-			Timestamps: true,
-		},
-	)
-	return req.Stream()
+func (c *client) GetLogs(namespaceID, podID string, containerNames []string) (io.ReadCloser, error) {
+	readClosersWithLabel := map[io.ReadCloser]string{}
+	for _, container := range containerNames {
+		req := c.client.CoreV1().Pods(namespaceID).GetLogs(
+			podID,
+			&apiv1.PodLogOptions{
+				Follow:     true,
+				Timestamps: true,
+				Container:  container,
+			},
+		)
+		readCloser, err := req.Stream()
+		if err != nil {
+			for rc := range readClosersWithLabel {
+				rc.Close()
+			}
+			return nil, err
+		}
+		readClosersWithLabel[readCloser] = container
+	}
+
+	return NewLogReadCloser(readClosersWithLabel), nil
 }
 
 func (c *client) DeletePod(namespaceID, podID string) error {

@@ -11,10 +11,7 @@ SCOPE_UI_BUILD_UPTODATE=.scope_ui_build.uptodate
 SCOPE_BACKEND_BUILD_IMAGE=$(DOCKERHUB_USER)/scope-backend-build
 SCOPE_BACKEND_BUILD_UPTODATE=.scope_backend_build.uptodate
 SCOPE_VERSION=$(shell git rev-parse --short HEAD)
-WEAVENET_VERSION=1.9.0
-DOCKER_VERSION=1.13.1
-DOCKER_DISTRIB=.pkg/docker-$(DOCKER_VERSION).tgz
-DOCKER_DISTRIB_URL=https://get.docker.com/builds/Linux/x86_64/docker-$(DOCKER_VERSION).tgz
+WEAVENET_VERSION=2.1.3
 RUNSVINIT=vendor/runsvinit/runsvinit
 CODECGEN_DIR=vendor/github.com/ugorji/go/codec/codecgen
 CODECGEN_EXE=$(CODECGEN_DIR)/bin/codecgen_$(shell go env GOHOSTOS)_$(shell go env GOHOSTARCH)
@@ -47,9 +44,6 @@ IMAGE_TAG=$(shell ./tools/image-tag)
 
 all: $(SCOPE_EXPORT)
 
-$(DOCKER_DISTRIB):
-	curl -o $(DOCKER_DISTRIB) $(DOCKER_DISTRIB_URL)
-
 docker/weave:
 	curl -L https://github.com/weaveworks/weave/releases/download/v$(WEAVENET_VERSION)/weave -o docker/weave
 	chmod u+x docker/weave
@@ -61,15 +55,12 @@ docker/weaveutil:
 docker/%: %
 	cp $* docker/
 
-docker/docker: $(DOCKER_DISTRIB)
-	tar -xvzf $(DOCKER_DISTRIB) docker/docker
-
 %.tar: docker/Dockerfile.%
 	$(SUDO) docker build -t $(DOCKERHUB_USER)/$* -f $< docker/
 	$(SUDO) docker tag $(DOCKERHUB_USER)/$* $(DOCKERHUB_USER)/$*:$(IMAGE_TAG)
 	$(SUDO) docker save $(DOCKERHUB_USER)/$*:latest > $@
 
-$(CLOUD_AGENT_EXPORT): docker/Dockerfile.cloud-agent docker/$(SCOPE_EXE) docker/docker docker/weave docker/weaveutil
+$(CLOUD_AGENT_EXPORT): docker/Dockerfile.cloud-agent docker/$(SCOPE_EXE) docker/weave docker/weaveutil
 
 $(SCOPE_EXPORT): docker/Dockerfile.scope $(CLOUD_AGENT_EXPORT) docker/$(RUNSVINIT) docker/demo.json docker/run-app docker/run-probe docker/entrypoint.sh
 
@@ -78,7 +69,6 @@ $(RUNSVINIT): vendor/runsvinit/*.go
 $(SCOPE_EXE): $(shell find ./ -path ./vendor -prune -o -type f -name '*.go') prog/staticui/staticui.go prog/externalui/externalui.go $(CODECGEN_TARGETS)
 
 report/report.codecgen.go: $(call GET_CODECGEN_DEPS,report/)
-render/render.codecgen.go: $(call GET_CODECGEN_DEPS,render/)
 render/detailed/detailed.codecgen.go: $(call GET_CODECGEN_DEPS,render/detailed/)
 static: prog/staticui/staticui.go prog/externalui/externalui.go
 prog/staticui/staticui.go: client/build/index.html

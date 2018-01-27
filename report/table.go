@@ -252,7 +252,10 @@ type TableTemplates map[string]TableTemplate
 
 // Tables renders the TableTemplates for a given node.
 func (t TableTemplates) Tables(node Node) []Table {
-	var result []Table
+	if len(t) == 0 {
+		return nil
+	}
+	result := make([]Table, 0, len(t))
 	for _, template := range t {
 		rows, truncationCount := node.ExtractTable(template)
 		// Extract the type from the template; default to
@@ -291,10 +294,10 @@ func (t TableTemplates) Merge(other TableTemplates) TableTemplates {
 	if t == nil && other == nil {
 		return nil
 	}
-	result := make(TableTemplates, len(t))
-	for k, v := range t {
-		result[k] = v
+	if len(other) > len(t) {
+		t, other = other, t
 	}
+	result := t.Copy()
 	for k, v := range other {
 		if existing, ok := result[k]; ok {
 			result[k] = v.Merge(existing)

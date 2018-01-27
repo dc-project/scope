@@ -189,12 +189,14 @@ type filterUnconnected struct {
 func (f filterUnconnected) Transform(input Nodes) Nodes {
 	output := filterInternetAdjacencies(input.Nodes)
 	connected := connected(output)
-	return FilterFunc(func(node report.Node) bool {
-		if _, ok := connected[node.ID]; ok || (f.onlyPseudo && !IsPseudoTopology(node)) {
-			return true
+	filtered := input.Filtered
+	for id, node := range output {
+		if _, ok := connected[id]; !ok && (!f.onlyPseudo || IsPseudoTopology(node)) {
+			delete(output, id)
+			filtered++
 		}
-		return false
-	}).Transform(Nodes{Nodes: output, Filtered: input.Filtered})
+	}
+	return Nodes{Nodes: output, Filtered: filtered}
 }
 
 // FilterUnconnected is a transformer that filters unconnected nodes
@@ -268,7 +270,7 @@ func DoesNotHaveLabel(labelKey string, labelValue string) FilterFunc {
 // IsNotPseudo returns true if the node is not a pseudo node
 // or internet/service nodes.
 func IsNotPseudo(n report.Node) bool {
-	return n.Topology != Pseudo || strings.HasSuffix(n.ID, TheInternetID) || strings.HasPrefix(n.ID, ServiceNodeIDPrefix)
+	return n.Topology != Pseudo || IsInternetNode(n) || strings.HasPrefix(n.ID, ServiceNodeIDPrefix)
 }
 
 // IsNamespace checks if the node is a pod/service in the specified namespace

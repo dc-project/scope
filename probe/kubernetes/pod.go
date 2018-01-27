@@ -10,9 +10,9 @@ import (
 
 // These constants are keys used in node metadata
 const (
-	State           = "kubernetes_state"
-	IsInHostNetwork = "kubernetes_is_in_host_network"
-	RestartCount    = "kubernetes_restart_count"
+	State           = report.KubernetesState
+	IsInHostNetwork = report.KubernetesIsInHostNetwork
+	RestartCount    = report.KubernetesRestartCount
 
 	StateDeleted = "deleted"
 )
@@ -24,6 +24,7 @@ type Pod interface {
 	NodeName() string
 	GetNode(probeID string) report.Node
 	RestartCount() uint
+	ContainerNames() []string
 }
 
 type pod struct {
@@ -85,4 +86,12 @@ func (p *pod) GetNode(probeID string) report.Node {
 	return p.MetaNode(report.MakePodNodeID(p.UID())).WithLatests(latests).
 		WithParents(p.parents).
 		WithLatestActiveControls(GetLogs, DeletePod)
+}
+
+func (p *pod) ContainerNames() []string {
+	containerNames := make([]string, 0, len(p.Pod.Spec.Containers))
+	for _, c := range p.Pod.Spec.Containers {
+		containerNames = append(containerNames, c.Name)
+	}
+	return containerNames
 }

@@ -5,9 +5,8 @@ import (
 	"strings"
 )
 
-// Topology describes a specific view of a network. It consists of nodes and
-// edges, and metadata about those nodes and edges, represented by
-// EdgeMetadatas and Nodes respectively. Edges are directional, and embedded
+// Topology describes a specific view of a network. It consists of
+// nodes with metadata, and edges. Edges are directional, and embedded
 // in the Node struct.
 type Topology struct {
 	Shape             string            `json:"shape,omitempty"`
@@ -175,10 +174,10 @@ func (n Nodes) Copy() Nodes {
 // Merge merges the other object into this one, and returns the result object.
 // The original is not modified.
 func (n Nodes) Merge(other Nodes) Nodes {
-	cp := make(Nodes, len(n))
-	for k, v := range n {
-		cp[k] = v
+	if len(other) > len(n) {
+		n, other = other, n
 	}
+	cp := n.Copy()
 	for k, v := range other {
 		if n, ok := cp[k]; ok { // don't overwrite
 			cp[k] = v.Merge(n)
@@ -206,13 +205,6 @@ func (t Topology) Validate() error {
 				errs = append(errs, fmt.Sprintf("node missing from adjacency %q -> %q", nodeID, dstNodeID))
 			}
 		}
-
-		// Check all the edge metadatas have entries in adjacencies
-		nmd.Edges.ForEach(func(dstNodeID string, _ EdgeMetadata) {
-			if _, ok := t.Nodes[dstNodeID]; !ok {
-				errs = append(errs, fmt.Sprintf("node %s missing for edge %q", dstNodeID, nodeID))
-			}
-		})
 	}
 
 	if len(errs) > 0 {

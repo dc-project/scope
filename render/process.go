@@ -2,6 +2,7 @@ package render
 
 import (
 	"github.com/weaveworks/scope/probe/docker"
+	"github.com/weaveworks/scope/probe/endpoint"
 	"github.com/weaveworks/scope/probe/process"
 	"github.com/weaveworks/scope/report"
 )
@@ -12,23 +13,16 @@ const (
 	OutboundMajor = "The Internet"
 	InboundMinor  = "Inbound connections"
 	OutboundMinor = "Outbound connections"
-
-	// Topology for pseudo-nodes and IPs so we can differentiate them at the end
-	Pseudo = "pseudo"
 )
 
 func renderProcesses(rpt report.Report) bool {
 	return len(rpt.Process.Nodes) >= 1
 }
 
-// EndpointRenderer is a Renderer which produces a renderable endpoint graph.
-var EndpointRenderer = SelectEndpoint
-
 // ProcessRenderer is a Renderer which produces a renderable process
 // graph by merging the endpoint graph and the process topology. It
-// also colors connected nodes. Since the process topology views only
-// show connected processes, we need this info to determine whether
-// processes appearing in a details panel are linkable.
+// also colors connected nodes, so we can apply a filter to show/hide
+// unconnected nodes depending on user choice.
 var ProcessRenderer = Memoise(ColorConnected(endpoints2Processes{}))
 
 // processWithContainerNameRenderer is a Renderer which produces a process
@@ -41,10 +35,10 @@ func (r processWithContainerNameRenderer) Render(rpt report.Report) Nodes {
 	processes := r.Renderer.Render(rpt)
 	containers := SelectContainer.Render(rpt)
 
-	outputs := report.Nodes{}
+	outputs := make(report.Nodes, len(processes.Nodes))
 	for id, p := range processes.Nodes {
 		outputs[id] = p
-		containerID, timestamp, ok := p.Latest.LookupEntry(docker.ContainerID)
+		containerID, ok := p.Latest.Lookup(docker.ContainerID)
 		if !ok {
 			continue
 		}
@@ -52,10 +46,7 @@ func (r processWithContainerNameRenderer) Render(rpt report.Report) Nodes {
 		if !ok {
 			continue
 		}
-		p.Latest = p.Latest.Set(docker.ContainerID, timestamp, containerID)
-		if containerName, timestamp, ok := container.Latest.LookupEntry(docker.ContainerName); ok {
-			p.Latest = p.Latest.Set(docker.ContainerName, timestamp, containerName)
-		}
+		propagateLatest(docker.ContainerName, container, p)
 		outputs[id] = p
 	}
 	return Nodes{Nodes: outputs, Filtered: processes.Filtered}
@@ -82,65 +73,63 @@ func (e endpoints2Processes) Render(rpt report.Report) Nodes {
 	if len(rpt.Process.Nodes) == 0 {
 		return Nodes{}
 	}
-	local := LocalNetworks(rpt)
-	processes := SelectProcess.Render(rpt)
-	endpoints := SelectEndpoint.Render(rpt)
-	ret := newJoinResults()
-
-	for _, n := range endpoints.Nodes {
-		// Nodes without a hostid are treated as pseudo nodes
-		if hostNodeID, ok := n.Latest.Lookup(report.HostNodeID); !ok {
-			if id, ok := pseudoNodeID(n, local); ok {
-				ret.addChild(n, id, newPseudoNode)
-			}
-		} else {
-			pid, timestamp, ok := n.Latest.LookupEntry(process.PID)
+	endpoints := SelectEndpoint.Render(rpt).Nodes
+	return MapEndpoints(
+		func(n report.Node) string {
+			pid, ok := n.Latest.Lookup(process.PID)
 			if !ok {
-				continue
+				return ""
 			}
-
-			if len(n.Adjacency) > 1 {
-				// We cannot be sure that the pid is associated with all the
-				// connections. It is better to drop such an endpoint than
-				// risk rendering bogus connections.
-				continue
+			if hasMoreThanOneConnection(n, endpoints) {
+				return ""
 			}
+			hostID := report.ExtractHostID(n)
+			if hostID == "" {
+				return ""
+			}
+			return report.MakeProcessNodeID(hostID, pid)
+		}, report.Process).Render(rpt)
+}
 
-			hostID, _, _ := report.ParseNodeID(hostNodeID)
-			id := report.MakeProcessNodeID(hostID, pid)
-			ret.addChild(n, id, func(id string) report.Node {
-				if processNode, found := processes.Nodes[id]; found {
-					return processNode
-				}
-				// we have a pid, but no matching process node; create a new one rather than dropping the data
-				return report.MakeNode(id).WithTopology(report.Process).
-					WithLatest(process.PID, timestamp, pid)
-			})
+// When there is more than one connection originating from a source
+// endpoint, we cannot be sure that its pid is associated with all of
+// them, since the source endpoint may have been re-used by a
+// different process. See #2665. It is better to drop such an endpoint
+// than risk rendering bogus connections.  Aliased connections - when
+// all the remote endpoints represent the same logical endpoint, due
+// to NATing - are fine though.
+func hasMoreThanOneConnection(n report.Node, endpoints report.Nodes) bool {
+	if len(n.Adjacency) < 2 {
+		return false
+	}
+	firstRealEndpointID := ""
+	for _, endpointID := range n.Adjacency {
+		if ep, ok := endpoints[endpointID]; ok {
+			if copyID, _, ok := ep.Latest.LookupEntry(endpoint.CopyOf); ok {
+				endpointID = copyID
+			}
+		}
+		if firstRealEndpointID == "" {
+			firstRealEndpointID = endpointID
+		} else if firstRealEndpointID != endpointID {
+			return true
 		}
 	}
-	ret.copyUnmatched(processes)
-	ret.fixupAdjacencies(processes)
-	ret.fixupAdjacencies(endpoints)
-	return ret.result()
+	return false
 }
+
+var processNameTopology = MakeGroupNodeTopology(report.Process, process.Name)
 
 // processes2Names maps process Nodes to Nodes for each process name.
 func processes2Names(processes Nodes) Nodes {
-	ret := newJoinResults()
+	ret := newJoinResults(nil)
 
 	for _, n := range processes.Nodes {
 		if n.Topology == Pseudo {
 			ret.passThrough(n)
-		} else {
-			name, timestamp, ok := n.Latest.LookupEntry(process.Name)
-			if ok {
-				ret.addChildAndChildren(n, name, func(id string) report.Node {
-					return report.MakeNode(id).WithTopology(MakeGroupNodeTopology(n.Topology, process.Name)).
-						WithLatest(process.Name, timestamp, name)
-				})
-			}
+		} else if name, ok := n.Latest.Lookup(process.Name); ok {
+			ret.addChildAndChildren(n, name, processNameTopology)
 		}
 	}
-	ret.fixupAdjacencies(processes)
-	return ret.result()
+	return ret.result(processes)
 }

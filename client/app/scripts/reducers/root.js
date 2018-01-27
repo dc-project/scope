@@ -21,9 +21,7 @@ import {
 } from '../selectors/topology';
 import { isPausedSelector } from '../selectors/time-travel';
 import { activeTopologyZoomCacheKeyPathSelector } from '../selectors/zooming';
-import { timestampsEqual } from '../utils/time-utils';
 import { applyPinnedSearches } from '../utils/search-utils';
-import { deserializeTimestamp } from '../utils/web-api-utils';
 import {
   findTopologyById,
   setTopologyUrlsById,
@@ -73,7 +71,7 @@ export const initialState = makeMap({
   pinnedSearches: makeList(), // list of node filters
   routeSet: false,
   searchFocused: false,
-  searchQuery: null,
+  searchQuery: '',
   selectedNetwork: null,
   selectedNodeId: null,
   showingHelp: false,
@@ -137,8 +135,9 @@ function setTopology(state, topologyId) {
   return state.set('currentTopologyId', topologyId);
 }
 
-function setDefaultTopologyOptions(state, topologyList) {
-  topologyList.forEach((topology) => {
+export function getDefaultTopologyOptions(state) {
+  let topologyOptions = makeOrderedMap();
+  state.get('topologies').forEach((topology) => {
     let defaultOptions = makeOrderedMap();
     if (topology.has('options') && topology.get('options')) {
       topology.get('options').forEach((option) => {
@@ -147,15 +146,11 @@ function setDefaultTopologyOptions(state, topologyList) {
         defaultOptions = defaultOptions.set(optionId, [defaultValue]);
       });
     }
-
     if (defaultOptions.size) {
-      state = state.setIn(
-        ['topologyOptions', topology.get('id')],
-        defaultOptions
-      );
+      topologyOptions = topologyOptions.set(topology.get('id'), defaultOptions);
     }
   });
-  return state;
+  return topologyOptions;
 }
 
 function closeNodeDetails(state, nodeId) {
@@ -381,13 +376,13 @@ export function rootReducer(state = initialState, action) {
     case ActionTypes.PAUSE_TIME_AT_NOW: {
       state = state.set('showingTimeTravel', false);
       state = state.set('timeTravelTransitioning', false);
-      return state.set('pausedAt', moment().utc());
+      return state.set('pausedAt', moment().utc().format());
     }
 
     case ActionTypes.START_TIME_TRAVEL: {
       state = state.set('showingTimeTravel', true);
       state = state.set('timeTravelTransitioning', false);
-      return state.set('pausedAt', action.timestamp || moment().utc());
+      return state.set('pausedAt', action.timestamp || moment().utc().format());
     }
 
     case ActionTypes.JUMP_TO_TIME: {
@@ -555,7 +550,7 @@ export function rootReducer(state = initialState, action) {
     case ActionTypes.RECEIVE_NODE_DETAILS: {
       // Ignore the update if paused and the timestamp didn't change.
       const setTimestamp = state.getIn(['nodeDetails', action.details.id, 'timestamp']);
-      if (isPausedSelector(state) && timestampsEqual(action.requestTimestamp, setTimestamp)) {
+      if (isPausedSelector(state) && action.requestTimestamp === setTimestamp) {
         return state;
       }
 
@@ -661,7 +656,7 @@ export function rootReducer(state = initialState, action) {
       state = setTopology(state, state.get('currentTopologyId'));
       // only set on first load, if options are not already set via route
       if (!state.get('topologiesLoaded') && state.get('topologyOptions').size === 0) {
-        state = setDefaultTopologyOptions(state, state.get('topologies'));
+        state = state.set('topologyOptions', getDefaultTopologyOptions(state));
       }
       state = state.set('topologiesLoaded', true);
 
@@ -688,14 +683,12 @@ export function rootReducer(state = initialState, action) {
         state = clearNodes(state);
       }
       state = setTopology(state, action.state.topologyId);
-      state = setDefaultTopologyOptions(state, state.get('topologies'));
       state = state.merge({
         selectedNodeId: action.state.selectedNodeId,
-        pinnedMetricType: action.state.pinnedMetricType
+        pinnedMetricType: action.state.pinnedMetricType,
       });
-      state = state.set('topologyViewMode', action.state.topologyViewMode);
-      if (action.state.pausedAt) {
-        state = state.set('pausedAt', deserializeTimestamp(action.state.pausedAt));
+      if (action.state.topologyViewMode) {
+        state = state.set('topologyViewMode', action.state.topologyViewMode);
       }
       if (action.state.gridSortedBy) {
         state = state.set('gridSortedBy', action.state.gridSortedBy);
@@ -727,9 +720,11 @@ export function rootReducer(state = initialState, action) {
       } else {
         state = state.update('nodeDetails', nodeDetails => nodeDetails.clear());
       }
+      // Use the default topology options for all the fields not
+      // explicitly listed in the Scope state (URL or local storage).
       state = state.set(
         'topologyOptions',
-        fromJS(action.state.topologyOptions) || state.get('topologyOptions')
+        getDefaultTopologyOptions(state).mergeDeep(action.state.topologyOptions),
       );
       return state;
     }
