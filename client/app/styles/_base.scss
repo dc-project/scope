@@ -103,7 +103,7 @@ a {
   font-size: 0.7rem;
   justify-content: center;
   padding: 5px;
-  position: absolute;
+  position: fixed;
   bottom: 11px;
 
   button {
@@ -198,7 +198,7 @@ a {
 
   &.time-travel-open {
     .details-wrapper {
-      margin-top: $timeline-height + 15px;
+      margin-top: $timeline-height + 50px;
     }
   }
 }
@@ -211,6 +211,7 @@ a {
   .selectors {
     display: flex;
     position: relative;
+
     > * {
       z-index: 20;
       flex: 1 1;
@@ -390,6 +391,10 @@ a {
     color: $text-secondary-color;
     width: 33%;
     height: 550px;
+
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 
     .heading {
       font-size: 125%;
@@ -1996,10 +2001,6 @@ a {
 //
 
 .nodes-grid {
-  // TODO: Would be good to have relative positioning here.
-  position: absolute;
-  top: 0;
-
   tr {
     border-radius: 6px;
   }
